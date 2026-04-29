@@ -1,0 +1,164 @@
+import { useState } from "react";
+import { base44 } from "@/api/base44Client";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Trophy, LogOut, Home } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Link } from "react-router-dom";
+import CreateGameForm from "@/components/admin/CreateGameForm";
+import GameCard from "@/components/admin/GameCard";
+import TicketsModal from "@/components/admin/TicketsModal";
+import DrawModal from "@/components/admin/DrawModal";
+import EditGameModal from "@/components/admin/EditGameModal";
+import AdminLogin from "@/components/admin/AdminLogin";
+
+export default function Admin() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [selectedGame, setSelectedGame] = useState(null);
+  const [showTickets, setShowTickets] = useState(false);
+  const [drawGame, setDrawGame] = useState(null);
+  const [editGame, setEditGame] = useState(null);
+  const queryClient = useQueryClient();
+
+  const { data: games = [], isLoading } = useQuery({
+    queryKey: ["games"],
+    queryFn: () => base44.entities.LotteryGame.list("-created_date"),
+  });
+
+  const { data: allTickets = [] } = useQuery({
+    queryKey: ["tickets"],
+    queryFn: () => base44.entities.LotteryTicket.list("-created_date"),
+  });
+
+  const createGame = useMutation({
+    mutationFn: (data) => base44.entities.LotteryGame.create(data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["games"] }),
+  });
+
+  const updateGame = useMutation({
+    mutationFn: ({ id, data }) => base44.entities.LotteryGame.update(id, data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["games"] }),
+  });
+
+  const handleClose = (game) => {
+    updateGame.mutate({ id: game.id, data: { status: "closed" } });
+  };
+
+  const handleConfirmDraw = async (game, winningNumbers) => {
+    await base44.entities.LotteryGame.update(game.id, {
+      status: "drawn",
+      winning_numbers: winningNumbers,
+    });
+
+    // Update match counts for tickets and send emails to winners
+    const gameTickets = allTickets.filter((t) => t.game_id === game.id);
+    const winSet = new Set(winningNumbers);
+    for (const ticket of gameTickets) {
+      const matches = ticket.numbers.filter((n) => winSet.has(n)).length;
+      await base44.entities.LotteryTicket.update(ticket.id, { matches });
+
+      if (matches > 0 && ticket.created_by) {
+        await base44.integrations.Core.SendEmail({
+          to: ticket.created_by,
+          subject: `🎉 זכית בהגרלה "${game.title}"!`,
+          body: `שלום ${ticket.player_name},\n\nברכות! זכית בהגרלה "${game.title}".\n\nהמספרים שבחרת: ${ticket.numbers.join(", ")}\nמספרים זוכים: ${winningNumbers.join(", ")}\nמספר התאמות: ${matches} מתוך ${game.pick_count || 6}\n\nבהצלחה!`,
+        });
+      }
+    }
+
+    queryClient.invalidateQueries({ queryKey: ["games"] });
+    queryClient.invalidateQueries({ queryKey: ["tickets"] });
+  };
+
+  const handleViewTickets = (game) => {
+    setSelectedGame(game);
+    setShowTickets(true);
+  };
+
+  const getTicketCount = (gameId) => allTickets.filter((t) => t.game_id === gameId).length;
+  const getGameTickets = (gameId) => allTickets.filter((t) => t.game_id === gameId);
+
+  if (!isAuthenticated) {
+    return <AdminLogin onSuccess={() => setIsAuthenticated(true)} />;
+  }
+
+  return (
+    <div className="min-h-screen p-4 py-8" dir="rtl">
+      <div className="max-w-4xl mx-auto space-y-8">
+        {/* Header */}
+        <div className="text-center space-y-2">
+          <div className="flex items-center justify-center gap-3">
+            <Trophy className="w-8 h-8 text-primary" />
+            <h1 className="text-3xl font-black text-foreground">ניהול לוטו</h1>
+          </div>
+          <p className="text-muted-foreground">צור משחקים, נהל קודים והגרל זוכים</p>
+          <div className="flex justify-center gap-2 mt-2">
+            <Button variant="ghost" size="sm" className="gap-2 text-muted-foreground hover:text-foreground" onClick={() => setIsAuthenticated(false)}>
+              <LogOut className="w-4 h-4" />
+              התנתק
+            </Button>
+            <Link to="/">
+              <Button variant="ghost" size="sm" className="gap-2 text-muted-foreground hover:text-foreground">
+                <Home className="w-4 h-4" />
+                דף הבית
+              </Button>
+            </Link>
+          </div>
+        </div>
+
+        {/* Create game form */}
+        <CreateGameForm onSubmit={(data) => createGame.mutate(data)} isSubmitting={createGame.isPending} />
+
+        {/* Games list */}
+        <div className="space-y-4">
+          <h2 className="text-xl font-bold text-foreground">משחקים</h2>
+          {isLoading ? (
+            <div className="flex justify-center py-12">
+              <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+            </div>
+          ) : games.length === 0 ? (
+            <div className="text-center py-12 text-muted-foreground">
+              <p>עדיין אין משחקים. צור את הראשון!</p>
+            </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2">
+              {games.map((game) => (
+                <GameCard
+                  key={game.id}
+                  game={game}
+                  ticketCount={getTicketCount(game.id)}
+                  onClose={handleClose}
+                  onDraw={(g) => setDrawGame(g)}
+                  onViewTickets={handleViewTickets}
+                  onEdit={(g) => setEditGame(g)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Modals */}
+      <TicketsModal
+        open={showTickets}
+        onClose={() => setShowTickets(false)}
+        game={selectedGame}
+        tickets={selectedGame ? getGameTickets(selectedGame.id) : []}
+      />
+
+      <EditGameModal
+        open={!!editGame}
+        onClose={() => setEditGame(null)}
+        game={editGame}
+        onSave={(id, data) => updateGame.mutateAsync({ id, data })}
+      />
+
+      <DrawModal
+        open={!!drawGame}
+        onClose={() => setDrawGame(null)}
+        game={drawGame}
+        onConfirmDraw={handleConfirmDraw}
+        allTickets={allTickets}
+      />
+    </div>
+  );
+}
